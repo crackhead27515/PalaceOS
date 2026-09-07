@@ -1,3 +1,2 @@
-# Team-R-18
-All Project
+# PalaceOS
 run with Rust(miniquad)
