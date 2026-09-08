@@ -57,7 +57,6 @@ pub enum DeskAction {
     OpenPhoto(String),
     RequestErase,
     Download(FileId),
-    DownloadPhoto(String),
     InstallComplete,
     DeletePermanently(FileId),
     MoveFiles(Vec<FileId>, MoveDest),
@@ -65,6 +64,10 @@ pub enum DeskAction {
     MarkMailRead(usize),
     Restore(Vec<FileId>),
     SendNewMail { to: String, subject: String, body: String, attachments: Vec<(FileId, String)> },
+    OpenHexPicker,
+    SelectPhotoForHexTool(String),
+    SavePhotoReview(String, crate::foundation::AnomalyCategory),
+    ExportPhotoReport(Vec<String>),
 }
 
 // 창 관리자에 넘기는 입력 상태.
@@ -181,6 +184,14 @@ impl WindowManager {
     // 특정 파일에 연결된 창이 지금 열려 있는지.
     pub fn is_open(&self, file: FileId) -> bool {
         self.windows.iter().any(|w| w.file == Some(file))
+    }
+
+    // 특정 파일에 연결된 창을 바로 닫는다 — HexPickerApp 처럼 "고르면 곧장 확정되고
+    // 창은 저절로 닫히는" UI에서, 고른 뒤 desktop.rs 가 직접 닫아줄 때 쓴다(그
+    // 앱 자신은 AppAction::Close 를 반환하는 대신 SelectPhotoForHexTool 만 반환
+    // 하므로, 창을 닫는 책임은 desktop.rs 쪽에 있다).
+    pub fn close_file(&mut self, file: FileId) {
+        self.windows.retain(|w| w.file != Some(file));
     }
 
     // 열려있는 창의 앱을 downcast 해서 상태를 읽으려고 쓴다(예: 새로고침 전에 File
@@ -473,7 +484,6 @@ impl WindowManager {
                 AppAction::OpenPhoto(filename) => actions.push(DeskAction::OpenPhoto(filename)),
                 AppAction::RequestErase => actions.push(DeskAction::RequestErase),
                 AppAction::Download(id) => actions.push(DeskAction::Download(id)),
-                AppAction::DownloadPhoto(filename) => actions.push(DeskAction::DownloadPhoto(filename)),
                 // 설치 마법사는 진행바가 다 찬 순간 이걸 한 번만 보내고(바탕화면
                 // 아이콘이 그 타이밍에 생기게) 창은 그대로 열어둔 채 Finish 페이지를
                 // 계속 보여준다 — Unlock/Download 와 달리 여기선 창을 안 닫는다.
@@ -501,6 +511,10 @@ impl WindowManager {
                     actions.push(DeskAction::SendNewMail { to, subject, body, attachments })
                 }
                 AppAction::Restore(ids) => actions.push(DeskAction::Restore(ids)),
+                AppAction::OpenHexPicker => actions.push(DeskAction::OpenHexPicker),
+                AppAction::SelectPhotoForHexTool(id) => actions.push(DeskAction::SelectPhotoForHexTool(id)),
+                AppAction::SavePhotoReview(id, anomaly) => actions.push(DeskAction::SavePhotoReview(id, anomaly)),
+                AppAction::ExportPhotoReport(photos) => actions.push(DeskAction::ExportPhotoReport(photos)),
             }
         }
 

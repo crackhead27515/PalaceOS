@@ -5,9 +5,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::apps::{
-    ensure_photos_selected, explorer_app_for_folder, explorer_app_refreshed, hextool_review_files, mail_attachable_files, open,
-    refresh_photos_feed, CreditsApp, ExplorerApp, ExplorerLocation, HexToolApp, MailApp, MoveDest, OfficialSiteApp, Opened, PhotoViewerApp,
-    SettingsApp,
+    ensure_photos_selected, explorer_app_for_folder, explorer_app_refreshed, mail_attachable_files, open, refresh_photos_feed, CreditsApp,
+    ExplorerApp, ExplorerLocation, HexPickerApp, HexToolApp, MailApp, MoveDest, OfficialSiteApp, Opened, PhotoViewerApp, SettingsApp,
 };
 use crate::foundation::{display_name, FileId, FileKind, FileOrigin, FileSystem, Language, SentMail, Settings, MY_COMPUTER_NAME, OFFICIAL_SITE_URL, RECYCLE_BIN_NAME};
 use crate::gfx::{Assets, Rect, Renderer, CELL_H, SCREEN_H, SCREEN_W};
@@ -101,10 +100,11 @@ fn menu_item_label(lang: Language, key: &str) -> &'static str {
 const CTX_TEXT_SCALE: f32 = 0.75;
 const CTX_ROW_H: f32 = CELL_H * CTX_TEXT_SCALE + 4.0;
 
-// 설정/크레딧 창을 구분하는 특수 FileId (실제 파일 아님).
+// 설정/크레딧/HexTool 이미지 선택 창을 구분하는 특수 FileId (실제 파일 아님).
 const SETTINGS_WIN: FileId = usize::MAX - 1;
 const CREDITS_WIN: FileId = usize::MAX - 2;
 const OFFICIAL_SITE_WIN: FileId = usize::MAX - 3;
+const HEX_PICKER_WIN: FileId = usize::MAX - 4;
 
 // Photos 피드에서 미리보기로 연 사진 창을 파일명별로 구분하는 가짜 FileId 대역의 시작점.
 // 진짜 fs.nodes 인덱스(0부터 시작, 지금 최대 수백 개)와도, CREDITS_WIN/OFFICIAL_SITE_WIN
@@ -283,8 +283,9 @@ const MAIL_ARRIVAL_DELAY: f32 = 5.0; // 데스크톱에 들어오고 이만큼 �
 const MAIL_AUTO_ARRIVE: bool = true;
 const TOAST_DURATION: f32 = 5.0; // 우측 하단 알림이 떠있는 시간(초)
 // 재연구 업무 메일이 말하는 "회사 이메일" — 입사 안내 메일을 보낸 그 주소로
-// 그대로 보고를 보내는 것으로 취급한다. 여기로 normalImage 가 아닌 사진을
-// 첨부해 보내면 ????? 피드가 새로 갱신된다(DeskAction::SendNewMail 참고).
+// 그대로 보고를 보내는 것으로 취급한다. 여기로 HexTool 검수 결과 압축파일
+// (FileKind::PhotoReport)을 첨부해 보내면 ????? 피드가 새로 갱신된다
+// (DeskAction::SendNewMail 참고).
 const REPORT_EMAIL: &str = "test@mail.com";
 
 impl Default for DesktopScene {
@@ -436,14 +437,16 @@ impl DesktopScene {
         }
     }
 
-    // HexTool 의 파일 선택 목록도 위와 같은 이유로 그 자리에서 바꿔치기한다 —
-    // 통째로 새로 열면 지금 보고 있던 미리보기/확대/슬라이더 상태가 다 날아간다.
-    fn refresh_hextool_if_open(&mut self) {
+    // ????? 피드가 새로 갱신되면(재연구 업무 보고 메일을 실제로 보내서) HexTool
+    // 이 지금 열려있어도 진행 상황(N개 중 M개) 계산 기준이 최신이 되도록 그
+    // 자리에서 photos_current 만 바꿔치기한다(통째로 새로 열면 지금 보고 있던
+    // 미리보기/확대/슬라이더 상태가 다 날아간다).
+    fn refresh_hextool_photos_if_open(&mut self) {
         if let Some(hextool_id) = self.fs.find_by_name("HexTool")
             && self.wm.is_open(hextool_id)
             && let Some(app) = self.wm.app_mut(hextool_id).and_then(|app| app.as_any_mut().downcast_mut::<HexToolApp>())
         {
-            app.refresh_review_files(hextool_review_files(&self.fs));
+            app.refresh_photos_current(self.fs.photos_current.clone());
         }
     }
 
@@ -1434,15 +1437,22 @@ impl Scene for DesktopScene {
                     }
                 }
                 DeskAction::OpenPhoto(filename) => {
-                    // Photos 피드에서 보는 창과 My Computer(Explorer/Downloads 탭)에서
-                    // 보는 창은 완전히 별개로 취급한다 — 같은 사진이어도 fs.nodes 에
-                    // 등록된 FileId 를 아예 안 쓴다(그건 "다운로드해서 실제로 갖고
-                    // 있는 파일"에만 붙는 정체성이라, apps::open() 의 FileKind::Photo
-                    // 분기에서만 만든다). 여기선 wm.open() 에 file: None 을 넘겨서,
-                    // My Computer 쪽에 그 사진 창이 이미 열려있어도 서로 겹쳐 앞으로
-                    // 당겨지는 일 없이 완전히 독립된 새 창(Download 버튼 있는 미리보기)
-                    // 이 뜬다 — 그래서 "이미 다운로드했으니 다시 열면 Download 버튼이
-                    // 안 보인다"가 Photos 피드 쪽에는 절대 영향을 안 준다.
+                    // ????? 피드에서 썸네일을 클릭하면 예전엔 뷰어를 연 뒤 "Download"
+                    // 글자를 한 번 더 눌러야 받아졌는데, 이제 클릭 한 번으로 곧장
+                    // 받아지도록 DownloadPhoto 와 같은 처리(find_or_add_photo + 등록)
+                    // 를 여기서 같이 한다 — 그래서 이 뷰어 창은 열릴 때 항상 이미
+                    // 다운로드가 끝난 상태다.
+                    let id = self.fs.find_or_add_photo(&filename);
+                    self.fs.download(id);
+                    self.refresh_explorer_if_open(&f.settings);
+                    self.refresh_mail_attachable_if_open();
+                    self.write_save(&f.settings);
+
+                    // 이 뷰어 창 자체는 My Computer(Explorer/Downloads 탭)에서 보는
+                    // 창과는 별개로 취급한다 — 같은 사진이어도 방금 만든 실제 FileId
+                    // (id) 대신 wm.open() 에 file: None 을 넘겨서, My Computer 쪽에
+                    // 그 사진 창이 이미 열려있어도 서로 겹쳐 앞으로 당겨지는 일 없이
+                    // 완전히 독립된 새 창이 뜬다.
                     //
                     // 다만 같은 사진을 피드 안에서 여러 번 클릭했을 때도 매번 새 창이
                     // 뜨는 건 원치 않으므로, 파일명에서 결정적으로 뽑아낸 가짜 FileId
@@ -1455,7 +1465,7 @@ impl Scene for DesktopScene {
                     let lang = f.settings.borrow().language;
                     let title_name = filename.rsplit('/').next().unwrap_or(&filename);
                     let op = Opened {
-                        app: Box::new(PhotoViewerApp::new(filename.clone(), true)),
+                        app: Box::new(PhotoViewerApp::new(filename.clone())),
                         title: display_name(lang, title_name).into_owned(),
                         size: (420.0, 320.0),
                         maximized: false,
@@ -1476,17 +1486,8 @@ impl Scene for DesktopScene {
                     // (다시 열어야만 보이던 문제).
                     self.refresh_explorer_if_open(&f.settings);
                     self.refresh_mail_attachable_if_open();
-                    self.refresh_hextool_if_open();
                     // 다운로드 직후 그 즉시 저장 — 5초 자동저장을 기다리는 사이 창이
                     // 닫히면 방금 다운로드한 기록이 통째로 사라지는 문제가 있었다.
-                    self.write_save(&f.settings);
-                }
-                DeskAction::DownloadPhoto(filename) => {
-                    let id = self.fs.find_or_add_photo(&filename);
-                    self.fs.download(id);
-                    self.refresh_explorer_if_open(&f.settings);
-                    self.refresh_mail_attachable_if_open();
-                    self.refresh_hextool_if_open();
                     self.write_save(&f.settings);
                 }
                 DeskAction::InstallComplete => {
@@ -1510,7 +1511,6 @@ impl Scene for DesktopScene {
                     self.fs.delete_permanently(id);
                     self.refresh_explorer_if_open(&f.settings);
                     self.refresh_mail_attachable_if_open();
-                    self.refresh_hextool_if_open();
                     self.write_save(&f.settings);
                 }
                 DeskAction::MoveFiles(ids, dest) => {
@@ -1545,7 +1545,6 @@ impl Scene for DesktopScene {
                     self.refresh_explorer_if_open(&f.settings);
                     self.refresh_recycle_bin_if_open(&f.settings);
                     self.refresh_mail_attachable_if_open();
-                    self.refresh_hextool_if_open();
                     self.write_save(&f.settings);
                 }
                 DeskAction::Restore(ids) => {
@@ -1553,7 +1552,6 @@ impl Scene for DesktopScene {
                     self.refresh_explorer_if_open(&f.settings);
                     self.refresh_recycle_bin_if_open(&f.settings);
                     self.refresh_mail_attachable_if_open();
-                    self.refresh_hextool_if_open();
                     self.write_save(&f.settings);
                 }
                 DeskAction::MarkMailRead(i) => {
@@ -1567,23 +1565,65 @@ impl Scene for DesktopScene {
                     }
                 }
                 DeskAction::SendNewMail { to, subject, body, attachments } => {
-                    // 재연구 업무 메일이 시킨 "이상 현상이 있는 사진을 회사 이메일로
-                    // 보고"를 실제로 해내면(REPORT_EMAIL 앞으로, normalImage 가 아닌
-                    // 사진을 하나라도 첨부해 보내면) ????? 피드를 새로 갱신한다 — 이게
+                    // 재연구 업무 메일이 시킨 "이상현상 검수 보고"를 실제로 해내면
+                    // (REPORT_EMAIL 앞으로, HexTool 검수 결과 압축파일(FileKind::
+                    // PhotoReport)을 첨부해 보내면) ????? 피드를 새로 갱신한다 — 이게
                     // "?????가 완전 랜덤이 아니라 특정 조건을 만족해야 바뀐다"의 그
                     // 조건이다. 첨부 목록을 SentMail 로 옮기기(move) 전에 먼저 확인해야
                     // 한다.
                     let sent_report = to.trim().eq_ignore_ascii_case(REPORT_EMAIL)
-                        && attachments.iter().any(|&(id, _)| {
-                            matches!(&self.fs.get(id).kind, FileKind::Photo(filename) if !filename.starts_with("normalImage/"))
-                        });
+                        && attachments.iter().any(|&(id, _)| matches!(&self.fs.get(id).kind, FileKind::PhotoReport(_)));
                     // Mail 의 "Write Mail" 탭에서 완전히 새로 작성해 보낸 메일 — 내용째
                     // fs.sent_mail 에 쌓아서 Mail 앱의 "Sent Items" 탭에 그대로 보여준다.
                     self.fs.sent_mail.push(SentMail { to, subject, body, attachments });
                     if sent_report {
                         refresh_photos_feed(&mut self.fs);
                         self.refresh_photos_if_open(&f.settings);
+                        self.refresh_hextool_photos_if_open();
                     }
+                    self.write_save(&f.settings);
+                }
+                DeskAction::OpenHexPicker => {
+                    // HexTool 의 "이미지 선택" — My Computer 와 비슷한 별도 창을 연다.
+                    // 실제 fs 노드가 아니라서 file 자리엔 HEX_PICKER_WIN(가짜 id)을 써서
+                    // 이미 열려있으면 새로 안 열고 앞으로만 가져온다.
+                    let op = Opened {
+                        app: Box::new(HexPickerApp::new(self.fs.photos_current.clone(), f.settings.clone())),
+                        title: t(f.settings.borrow().language, crate::strings::hex_picker::TITLE).to_string(),
+                        size: (360.0, 300.0),
+                        maximized: false,
+                        resizable: true,
+                        maximizable: true,
+                        movable: true,
+                        min_size: (260.0, 200.0),
+                    };
+                    self.wm.open(op, Some(HEX_PICKER_WIN), work);
+                }
+                DeskAction::SelectPhotoForHexTool(id) => {
+                    // 선택 창에서 사진을 골랐다 — HexTool 창에 그대로 꽂아주고
+                    // 선택 창은 곧장 닫는다(파일 열기 대화상자처럼).
+                    if let Some(hextool_id) = self.fs.find_by_name("HexTool")
+                        && let Some(app) = self.wm.app_mut(hextool_id).and_then(|app| app.as_any_mut().downcast_mut::<HexToolApp>())
+                    {
+                        app.set_selected_photo(id);
+                    }
+                    self.wm.close_file(HEX_PICKER_WIN);
+                }
+                DeskAction::SavePhotoReview(id, category) => {
+                    self.fs.photo_reviews.insert(id, category);
+                    self.write_save(&f.settings);
+                }
+                DeskAction::ExportPhotoReport(photos) => {
+                    // HexTool 이 ????? 사진을 전부 검수하고 "압축파일 내보내기"를
+                    // 눌렀다 — 바탕화면이 아니라 메일 첨부를 "Download" 하는 것과
+                    // 같은 취급으로 File Explorer 의 Downloads 탭에 바로 넣는다.
+                    // set_photo_report() 는 이미 압축파일이 있으면 내용만 갈아끼우고
+                    // 같은 id 를 재사용하므로, fs.download() 도 매번 다시 불러도
+                    // 안전하다(이미 목록에 있으면 아무 일도 안 한다).
+                    let (id, _) = self.fs.set_photo_report(photos);
+                    self.fs.download(id);
+                    self.refresh_explorer_if_open(&f.settings);
+                    self.refresh_mail_attachable_if_open();
                     self.write_save(&f.settings);
                 }
                 DeskAction::EmptyTrash(ids) => {
@@ -1601,7 +1641,6 @@ impl Scene for DesktopScene {
                     self.refresh_explorer_if_open(&f.settings);
                     self.refresh_recycle_bin_if_open(&f.settings);
                     self.refresh_mail_attachable_if_open();
-                    self.refresh_hextool_if_open();
                     self.write_save(&f.settings);
                 }
             }
