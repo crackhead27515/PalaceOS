@@ -25,8 +25,7 @@ pub enum FileKind {
     #[serde(rename = "Email")]
     Mail { attachment: Option<FileId> },                // 메일 앱 (첨부파일 하나까지)
     Explorer,                                           // 바탕화면의 File Explorer (탭 있는 탐색기)
-    Tar,                                                 // .tar 압축파일 — FileSystem::hex_tool_installed 가 true 여야 실제로 열어볼 수 있다
-    Installer,                                           // Tar 를 열 수 있게 해주는 프로그램의 설치 마법사(.exe)
+    Installer,                                           // HexTool 을 설치해주는 설치 마법사(.exe)
     HexTool,                                             // Installer 를 끝까지 마치면 바탕화면에 생기는 설치된 프로그램 아이콘
     PhotoGallery,                                        // 바탕화면의 Photos 앱 — assets/photo/ 사진들을 피드로 훑어보고 다운로드
     Photo(String),                                       // Photos 앱에서 다운로드한 사진 한 장 — assets/photo/ 안의 파일명
@@ -48,6 +47,21 @@ pub enum AnomalyCategory {
     Corpse,
     Glitch,
     NoAnomaly,
+}
+
+// HexTool 검수의 "정답" — assets/photo 하위 폴더명(photos.rs::scan_photos 가
+// 식별자 앞에 그대로 붙이는 "폴더명/파일명")이 곧 정답 카테고리다: corpseImage
+// 는 시체, crackImage 는 글리치, hintImage/normalImage(및 하위 폴더 없이 바로
+// 밑에 있는 사진)는 이상현상 없음. 플레이어에게 이 정답을 보여주는 화면은
+// 어디에도 없다 — desktop.rs::DeskAction::SendNewMail 이 재연구 업무 보고
+// 메일을 실제로 보낼 때 fs.photo_reviews 와 비교해서 director_panel Vars 탭에
+// 표시할 정상/비정상 제출 횟수를 셀 때만 쓴다.
+pub fn expected_anomaly(photo_id: &str) -> AnomalyCategory {
+    match photo_id.split('/').next().unwrap_or(photo_id) {
+        "corpseImage" => AnomalyCategory::Corpse,
+        "crackImage" => AnomalyCategory::Glitch,
+        _ => AnomalyCategory::NoAnomaly,
+    }
 }
 
 // 일부 fs 노드는 이름 자체가 "이건 특수 노드다"라는 표식으로 쓰인다(전용
@@ -86,7 +100,7 @@ pub struct FileSystem {
     // 쪽 필드 이름만 email_* 에서 mail_* 로 바꿔서 예전 저장 파일도 계속 불러와진다.
     #[serde(rename = "email_arrived")]
     pub mail_arrived: bool,     // 첫 메일이 도착했는지 — 도착 전엔 받은편지함이 빈 상태
-    pub hex_tool_installed: bool, // HexTool Setup.exe 설치 마법사를 끝까지 마쳤는지 — 이게 true 여야 .tar 를 열 수 있다
+    pub hex_tool_installed: bool, // HexTool Setup.exe 설치 마법사를 끝까지 마쳤는지 — 이게 true 여야 바탕화면에 실제 HexTool 이 생긴다
     // 읽은 메일의 인덱스(MailApp::seed_messages 순번) — MailApp 자체는 창을 닫거나
     // 3초 주기 새로고침으로 새로 만들어질 때마다 통째로 새 인스턴스가 되므로, 읽음
     // 여부를 여기(저장 파일에 실리는 fs)에 둬야 새로고침은 물론 게임을 종료했다
@@ -130,6 +144,14 @@ pub struct FileSystem {
     // 굳이 지우지 않아도 된다.
     #[serde(default)]
     pub photo_reviews: std::collections::HashMap<String, AnomalyCategory>,
+    // 재연구 업무 보고 메일을 실제로 보낸 횟수 — 그 배치의 모든 사진이
+    // expected_anomaly() 정답과 정확히 일치하면 ok, 하나라도 틀렸으면 bad 로
+    // 센다(desktop.rs::DeskAction::SendNewMail). 게임 안 어디에도 안 보여주고
+    // director_panel 의 Vars 탭 디버그 표시 전용이다.
+    #[serde(default)]
+    pub report_submissions_ok: u32,
+    #[serde(default)]
+    pub report_submissions_bad: u32,
 }
 
 // Mail 의 "Write Mail" 탭에서 보낸 메일 한 통 — fs.sent_mail 에 쌓인다. 첨부는
@@ -169,6 +191,28 @@ impl Default for FileSystem {
     }
 }
 
+// FileSystem::download() 이 쓴다 — existing(지금 Downloads 탭에 이미 있는
+// 파일들의 이름) 안에 name 과 완전히 같은 게 있으면, 실제 Windows 탐색기가
+// 중복 다운로드를 처리하듯 확장자 앞에 "(1)", "(2)"... 를 붙여 안 겹치는
+// 이름을 찾아 돌려준다. 겹치는 게 없으면 원래 이름 그대로.
+fn dedupe_download_name(existing: &[String], name: &str) -> String {
+    if !existing.iter().any(|n| n == name) {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s, format!(".{e}")),
+        None => (name, String::new()),
+    };
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("{stem}({n}){ext}");
+        if !existing.iter().any(|x| x == &candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 impl FileSystem {
     pub fn new() -> FileSystem {
         let mut fs = FileSystem {
@@ -188,6 +232,8 @@ impl FileSystem {
             photos_current: Vec::new(), // DesktopScene::new() 가 ensure_photos_selected() 로 채운다
             photos_seen: Vec::new(),
             photo_reviews: std::collections::HashMap::new(),
+            report_submissions_ok: 0,
+            report_submissions_bad: 0,
         };
 
         // 바탕화면엔 고정 아이콘 두 개만 둔다 — 나머지 예제 파일들은 다 치웠다.
@@ -195,10 +241,10 @@ impl FileSystem {
         // Photos.tar/Photos.lock/HexTool Setup.exe 로 이어지던 첫 챕터용 플레이스홀더
         // 사진 콘텐츠(photo01/02.jpg)를 걷어냈다 — 실제 검수 로직 없이 그냥 열어볼
         // 수 있는 사진 두 장뿐이던 임시 내용이라, 진짜 Chapter 1 콘텐츠로 다시 채울
-        // 예정. 이 콘텐츠를 그리던 앱(installer.rs/archive.rs/hextool.rs/
-        // image_viewer.rs)과 관련 FileKind(Installer/Tar/Lock/Img) 자체는 나중에
-        // 다른 콘텐츠로 재사용할 수 있게 그대로 남겨뒀다 — 지금은 그냥 아무 데서도
-        // 안 만들어질 뿐이다.
+        // 예정. HexTool 은 그 뒤 사진 검수 도구로 다시 만들어져 실제로 쓰이지만,
+        // 이 콘텐츠를 그리던 나머지 앱(image_viewer.rs)과 관련 FileKind(Lock/Img)
+        // 자체는 나중에 다른 콘텐츠로 재사용할 수 있게 그대로 남겨뒀다 — 지금은
+        // 그냥 아무 데서도 안 만들어질 뿐이다.
         let mail = fs.add("Mail", FileKind::Mail { attachment: None });
         // Mail 바로 아래(fs.desktop 에서 mail 다음 순번 = 같은 열의 바로 아랫칸,
         // desktop.rs::grid_pos 가 열 우선으로 채운다) 사진 피드 앱. 이름은 읽을
@@ -284,8 +330,13 @@ impl FileSystem {
     }
 
     // 메일 첨부파일 등을 "다운로드" — Downloads 탭에 추가한다(이미 있으면 무시).
+    // Downloads 탭에 이미 같은 이름의 파일이 있으면(실제 Windows 탐색기가
+    // 그러듯) "이름(1).확장자", "이름(2).확장자" 식으로 번호를 붙여 구분한다.
     pub fn download(&mut self, id: FileId) {
         if !self.downloads.contains(&id) {
+            let existing_names: Vec<String> = self.downloads.iter().map(|&i| self.nodes[i].name.clone()).collect();
+            let name = self.nodes[id].name.clone();
+            self.nodes[id].name = dedupe_download_name(&existing_names, &name);
             self.downloads.push(id);
         }
         if !self.ever_downloaded.contains(&id) {
@@ -303,7 +354,7 @@ impl FileSystem {
         }
     }
 
-    // 파일을 영구히 지운다 — HexTool 로 검토를 끝낸 .tar 를 없앨 때 쓴다. 인덱스
+    // 파일을 영구히 지운다 — 휴지통 비우기 등에 쓴다. 인덱스
     // 기반 FileId 를 그대로 다른 곳(폴더 children, 저장 파일 등)에서 계속 쓰고
     // 있어서 아레나에서 물리적으로 빼버리면(Vec::remove) 그 뒤 인덱스가 전부
     // 밀려 다른 참조가 깨진다 — 그 대신 downloads 목록과 모든 폴더의 children 에서만
@@ -340,6 +391,13 @@ impl FileSystem {
 
     // 파일을 실제 폴더(잠금 풀린 Photos 등) 안으로 옮긴다 — 이미 그 폴더 안에 있으면 무시.
     pub fn add_to_folder(&mut self, folder_id: FileId, id: FileId) {
+        // 폴더를 자기 자신 안으로 옮기면(예: 열려서 드릴다운 탭으로 보이고 있는
+        // 폴더를 그 탭 안으로 다시 드래그) 자기 자신을 자기 children 에 넣는
+        // 자기참조 상태가 된다 — 휴지통 자기참조를 막던 것과 같은 종류의 버그라,
+        // 여기 공용 함수에서 한 번에 막는다(호출부마다 따로 검사할 필요 없이).
+        if folder_id == id {
+            return;
+        }
         if let FileKind::Folder { children } = &mut self.nodes[folder_id].kind
             && !children.contains(&id)
         {
